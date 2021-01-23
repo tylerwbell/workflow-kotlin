@@ -52,7 +52,7 @@ internal class BackStackContainerLifecycleActivity : AbstractLifecycleTestActivi
   }
 
   private val viewObserver =
-    object : ViewObserver<LeafRendering> by lifecycleLoggingViewObserver({ it.name }) {
+    object : ViewObserver<LeafRendering> by lifecycleLoggingViewObserver() {
       override fun onViewCreated(
         view: View,
         rendering: LeafRendering

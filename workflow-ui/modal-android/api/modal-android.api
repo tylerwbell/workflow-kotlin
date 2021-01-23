@@ -24,6 +24,7 @@ public abstract class com/squareup/workflow1/ui/modal/ModalContainer : android/w
 	public fun <init> (Landroid/content/Context;Landroid/util/AttributeSet;II)V
 	public synthetic fun <init> (Landroid/content/Context;Landroid/util/AttributeSet;IIILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	protected abstract fun buildDialog (Ljava/lang/Object;Lcom/squareup/workflow1/ui/ViewEnvironment;)Lcom/squareup/workflow1/ui/modal/ModalContainer$DialogRef;
+	protected fun onAttachedToWindow ()V
 	protected fun onRestoreInstanceState (Landroid/os/Parcelable;)V
 	protected fun onSaveInstanceState ()Landroid/os/Parcelable;
 	protected final fun update (Lcom/squareup/workflow1/ui/modal/HasModals;Lcom/squareup/workflow1/ui/ViewEnvironment;)V

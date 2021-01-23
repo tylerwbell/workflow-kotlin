@@ -1,35 +1,44 @@
 package com.squareup.workflow1.ui.backstack
 
-import android.os.Parcel
-import android.os.Parcelable
-import android.os.Parcelable.Creator
-import android.util.SparseArray
+import android.os.Bundle
 import android.view.View
-import android.view.View.BaseSavedState
+import android.view.View.OnAttachStateChangeListener
 import androidx.annotation.VisibleForTesting
 import androidx.annotation.VisibleForTesting.PRIVATE
+import androidx.lifecycle.Lifecycle.Event
+import androidx.lifecycle.Lifecycle.Event.ON_CREATE
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.savedstate.SavedStateRegistry.SavedStateProvider
+import androidx.savedstate.SavedStateRegistryOwner
 import com.squareup.workflow1.ui.Named
-import com.squareup.workflow1.ui.WorkflowLifecycleOwner
+import com.squareup.workflow1.ui.WorkflowAndroidXSupport.savedStateRegistryOwnerFromViewTreeOrContext
 import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
-import com.squareup.workflow1.ui.backstack.ViewStateCache.SavedState
 import com.squareup.workflow1.ui.getRendering
 
 /**
  * Handles persistence chores for container views that manage a set of [Named] renderings,
  * showing a view for one at a time -- think back stacks or tab sets.
- *
- * This class implements [Parcelable] so that it can be preserved from
- * a container view's own [View.saveHierarchyState] method. A simple container can
- * return [SavedState] from that method rather than creating its own persistence class.
  */
 @WorkflowUiExperimentalApi
 public class ViewStateCache
 @VisibleForTesting(otherwise = PRIVATE)
 internal constructor(
   @VisibleForTesting(otherwise = PRIVATE)
-  internal val viewStates: MutableMap<String, ViewStateFrame>
-) : Parcelable {
+  internal val hiddenViewStates: MutableMap<String, ViewStateFrame>
+) {
   public constructor() : this(mutableMapOf())
+
+  /**
+   * The [ViewStateFrame] that holds the state for the last screen shown by [update]. We need to
+   * have a reference ot this frame because it needs to have its SavedStateRegistry saved whenever
+   * [saveToBundle] is called.
+   */
+  private var currentFrame: ViewStateFrame? = null
+
+  private var isInstalled = false
+  private var isRestored = false
+  private var parentSavedStateRegistryOwner: SavedStateRegistryOwner? = null
 
   /**
    * To be called when the set of hidden views changes but the visible view remains
@@ -37,23 +46,45 @@ internal constructor(
    * [compatible][com.squareup.workflow1.ui.compatible] those in [retaining] will be dropped.
    */
   public fun prune(retaining: Collection<Named<*>>) {
+    require(isInstalled)
     pruneKeys(retaining.map { it.compatibilityKey })
   }
 
   private fun pruneKeys(retaining: Collection<String>) {
-    val deadKeys = viewStates.keys - retaining
-    viewStates -= deadKeys
+    val deadKeys = hiddenViewStates.keys - retaining
+    hiddenViewStates -= deadKeys
+  }
+
+  private lateinit var viewStateListener: ViewStateListener
+
+  /**
+   * Registers this [ViewStateCache] to start listening for attach/detach and lifecycle events on
+   * [view] in order to dispatch the appropriate save/restore calls.
+   *
+   * This must be called by backstack container views exactly once, and must be called before
+   * [update].
+   */
+  public fun installOnContainer(view: View) {
+    check(!isInstalled) { "Expected installOnContainer to only be called once." }
+    isInstalled = true
+
+    viewStateListener = ViewStateListener(view)
+    view.addOnAttachStateChangeListener(viewStateListener)
+    if (view.isAttachedToWindow) {
+      // If we're already attached the onAttached callback won't be invoked, so we call it manually.
+      viewStateListener.onViewAttachedToWindow(view)
+    }
   }
 
   /**
-   * @param retainedRenderings the renderings to be considered hidden after this update. Any
+   * @param retainedHiddenRenderings the renderings to be considered hidden after this update. Any
    * associated view state will be retained in the cache, possibly to be restored to [newView]
    * on a succeeding call to his method. Any other cached view state will be dropped.
    *
    * @param oldViewMaybe the view that is being removed, if any, which is expected to be showing
    * a [Named] rendering. If that rendering is
    * [compatible with][com.squareup.workflow1.ui.compatible] a member of
-   * [retainedRenderings], its state will be [saved][View.saveHierarchyState].
+   * [retainedHiddenRenderings], its state will be [saved][View.saveHierarchyState].
    *
    * @param newView the view that is about to be displayed, which must be showing a
    * [Named] rendering. If [compatible][com.squareup.workflow1.ui.compatible]
@@ -62,114 +93,175 @@ internal constructor(
    * @return true if [newView] has been restored.
    */
   public fun update(
-    retainedRenderings: Collection<Named<*>>,
+    retainedHiddenRenderings: Collection<Named<*>>,
     oldViewMaybe: View?,
     newView: View
   ) {
+    require(isInstalled)
+
+    val oldFrame = currentFrame
     val newKey = newView.namedKey
-    val hiddenKeys = retainedRenderings.asSequence()
-      .map { it.compatibilityKey }
-      .toSet()
-      .apply {
-        require(retainedRenderings.size == size) {
-          "Duplicate entries not allowed in $retainedRenderings."
-        }
+    val retainedKeys = retainedHiddenRenderings.mapTo(mutableSetOf()) { it.compatibilityKey }
+    require(retainedHiddenRenderings.size == retainedKeys.size) {
+      "Duplicate entries not allowed in $retainedHiddenRenderings."
+    }
+    require(newKey !in retainedKeys) {
+      "Expected retainedHiddenRenderings to not include the new rendering."
+    }
+
+    val restoredFrame = hiddenViewStates.remove(newKey)
+    val isPopping = restoredFrame != null
+    currentFrame = (restoredFrame ?: ViewStateFrame(newKey)).apply {
+      attach(newView)
+
+      if (isRestored || isPopping) {
+        // If we haven't been restored yet, and we're not popping, then this is the first view this
+        // ViewStateCache has seen. Otherwise, this is a navigation. Otherwise, we're expecting a
+        // call to restoreFromBundle which will take care of invoking this for us.
+        // If we're popping then we are not coming up from a config change or anything.
+        restoreAndroidXStateRegistry()
       }
 
-    viewStates.remove(newKey)
-      ?.let { newView.restoreHierarchyState(it.viewState) }
+      if (isPopping) {
+        // We're navigating back to an old screen, so we need to restore the view hierarchy
+        // manually. If we're not popping, then the Android framework will restore the view
+        // hierarchy itself.
+        restoreViewHierarchyState()
+      }
+    }
 
     if (oldViewMaybe != null) {
-      oldViewMaybe.namedKey.takeIf { hiddenKeys.contains(it) }
-        ?.let { savedKey ->
-          val saved = SparseArray<Parcelable>().apply {
-            oldViewMaybe.saveHierarchyState(this)
-          }
-          viewStates += savedKey to ViewStateFrame(savedKey, saved)
-        }
+      // The old view should have been shown by a previous call to update, which should have also
+      // set currentFrame, which means oldFrame should never be null.
+      requireNotNull(oldFrame) {
+        "Expected oldViewMaybe to have been previously passed to update."
+      }
+      val oldKey = oldViewMaybe.namedKey
+      require(oldKey !in hiddenViewStates) {
+        "Something's wrong – the old key is already hidden."
+      }
 
-      // Notify the view we're about to replace that it's going away.
-      WorkflowLifecycleOwner.get(oldViewMaybe)?.destroyOnDetach()
+      if (oldKey in retainedKeys) {
+        // Old view may be returned to later, so we need to save its state.
+        // Note that this must be done before destroying the lifecycle.
+        oldFrame.performSave(saveViewHierarchyState = true)
+      }
+
+      // Don't destroy the lifecycle right away, wait until the view is detached (e.g. after the
+      // transition has finished).
+      oldFrame.destroyOnDetach()
+      hiddenViewStates[oldKey] = oldFrame
     }
 
-    pruneKeys(hiddenKeys)
+    pruneKeys(retainedKeys)
   }
 
   /**
-   * Replaces the state of the receiver with that of [from]. Typical usage is to call this from
-   * a container view's [View.onRestoreInstanceState].
+   * Saves the state registry for the current frame, and all the saved state for hidden frames,
+   * to a bundle, and returns it. The result can be passed to [restoreFromBundle].
    */
-  public fun restore(from: ViewStateCache) {
-    viewStates.clear()
-    viewStates += from.viewStates
+  @VisibleForTesting(otherwise = PRIVATE)
+  internal fun saveToBundle(): Bundle {
+    return Bundle().apply {
+      currentFrame?.let {
+        // First ask the current SavedStateRegistry to save its state providers.
+        // We don't need to save the view hierarchy here because the current view will already have
+        // its state saved by the regular view tree traversal.
+        it.performSave(saveViewHierarchyState = false)
+        putParcelable(it.key, it)
+      }
+
+      hiddenViewStates.forEach { (key, frame) ->
+        putParcelable(key, frame)
+      }
+    }
   }
 
   /**
-   * Convenience for use in [View.onSaveInstanceState] and [View.onRestoreInstanceState]
-   * methods of container views that have no other state of their own to save.
+   * Given a bundle returned from [saveToBundle], restores hidden frames' states, and, if [update]
+   * has been called, loads the current frame's state registry data and restores it to the actual
+   * registry. If [update] has not been called, the registry data is still loaded, but will be
+   * sent to the actual registry when it's created by [update].
    *
-   * More interesting containers should create their own subclass of [BaseSavedState]
-   * rather than trying to extend this one.
+   * Called as soon as the lifecycle has moved to the CREATED state.
    */
-  public class SavedState : BaseSavedState {
-    public constructor(
-      superState: Parcelable?,
-      viewStateCache: ViewStateCache
-    ) : super(superState) {
-      this.viewStateCache = viewStateCache
+  @VisibleForTesting(otherwise = PRIVATE)
+  internal fun restoreFromBundle(bundle: Bundle?) {
+    require(!isRestored)
+    isRestored = true
+
+    hiddenViewStates.clear()
+
+    bundle?.keySet()?.forEach { key ->
+      val frame = bundle.getParcelable<ViewStateFrame>(key)!!
+      if (key == currentFrame?.key) {
+        // This just passes the data to the frame, it doesn't actually tell the
+        currentFrame!!.loadAndroidXStateRegistryFrom(frame)
+      } else {
+        hiddenViewStates[key] = frame
+      }
     }
 
-    public constructor(source: Parcel) : super(source) {
-      this.viewStateCache = source.readParcelable(SavedState::class.java.classLoader)!!
-    }
-
-    public val viewStateCache: ViewStateCache
-
-    override fun writeToParcel(
-      out: Parcel,
-      flags: Int
-    ) {
-      super.writeToParcel(out, flags)
-      out.writeParcelable(viewStateCache, flags)
-    }
-
-    public companion object CREATOR : Creator<SavedState> {
-      override fun createFromParcel(source: Parcel): SavedState =
-        SavedState(source)
-
-      override fun newArray(size: Int): Array<SavedState?> = arrayOfNulls(size)
-    }
+    // If currentFrame is null here for some reason, that's fine – the next call to update will see
+    // that the isRestored flag is set and restore the new frame itself.
+    // Note that this needs to be called even if the current frame wasn't restored from the bundle,
+    // since it must have been called if we ever ask this frame to performSave in the future.
+    currentFrame?.restoreAndroidXStateRegistry()
   }
 
-// region Parcelable
+  private inner class ViewStateListener(private val view: View) : OnAttachStateChangeListener,
+    LifecycleEventObserver,
+    SavedStateProvider {
+    // This is the same key format that AndroidComposeView uses.
+    private val stateRegistryKey get() = "${ViewStateCache::class.java.simpleName}:${view.id}"
 
-  override fun describeContents(): Int = 0
+    override fun onViewAttachedToWindow(v: View) {
+      require(view.id != View.NO_ID) {
+        "Expected BackStackContainer to have an ID set for view state restoration."
+      }
 
-  override fun writeToParcel(
-    parcel: Parcel,
-    flags: Int
-  ) {
-    @Suppress("UNCHECKED_CAST")
-    parcel.writeMap(viewStates as MutableMap<Any?, Any?>)
-  }
-
-  public companion object CREATOR : Creator<ViewStateCache> {
-    override fun createFromParcel(parcel: Parcel): ViewStateCache {
-      @Suppress("UNCHECKED_CAST")
-      return mutableMapOf<String, ViewStateFrame>()
-        .apply {
-          parcel.readMap(
-            this as MutableMap<Any?, Any?>,
-            ViewStateCache::class.java.classLoader
-          )
+      parentSavedStateRegistryOwner =
+        requireNotNull(savedStateRegistryOwnerFromViewTreeOrContext(v)) {
+          "Expected to find either a ViewTreeSavedStateRegistryOwner in the view tree, or a " +
+            "SavedStateRegistryOwner in the Context chain."
         }
-        .let { ViewStateCache(it) }
+
+      // We can only restore once, so if we're already restored we don't care about the parent
+      // registry or lifecycle.
+      if (isRestored) return
+
+      // This will always fire onStateChanged at least once to notify it of the current state.
+      // The SavedStateRegistry contract says we can't read our restored state back from the
+      // registry until after the lifecycle moves to the CREATED state, so we have to wait for that
+      // to happen instead of just restoring directly here.
+      parentSavedStateRegistryOwner!!.lifecycle.addObserver(this)
+      parentSavedStateRegistryOwner!!.savedStateRegistry
+        // TODO add unit test that fails when these keys are not unique
+        .registerSavedStateProvider(stateRegistryKey, this)
     }
 
-    override fun newArray(size: Int): Array<ViewStateCache?> = arrayOfNulls(size)
-  }
+    override fun onViewDetachedFromWindow(v: View) {
+      parentSavedStateRegistryOwner?.savedStateRegistry
+        ?.unregisterSavedStateProvider(stateRegistryKey)
+      parentSavedStateRegistryOwner?.lifecycle?.removeObserver(this)
+      parentSavedStateRegistryOwner = null
+    }
 
-// endregion
+    override fun onStateChanged(
+      source: LifecycleOwner,
+      event: Event
+    ) {
+      if (event == ON_CREATE) {
+        // We can now read from our parent's saved state registry.
+        val registry = parentSavedStateRegistryOwner!!.savedStateRegistry
+        val restoredBundle = registry.consumeRestoredStateForKey(stateRegistryKey)
+        restoreFromBundle(restoredBundle)
+        parentSavedStateRegistryOwner!!.lifecycle.removeObserver(this)
+      }
+    }
+
+    override fun saveState(): Bundle = saveToBundle()
+  }
 }
 
 @WorkflowUiExperimentalApi
@@ -178,6 +270,6 @@ private val View.namedKey: String
     val rendering = getRendering<Named<*>>()
     return checkNotNull(rendering?.compatibilityKey) {
       "Expected $this to be showing a ${Named::class.java.simpleName}<*> rendering, " +
-          "found $rendering"
+        "found $rendering"
     }
   }

@@ -96,6 +96,8 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
       }
     }
 
+    linkModalViewTreeOwners(newDialogs)
+
     (dialogs - newDialogs).forEach { it.dismiss() }
     dialogs = newDialogs
   }
@@ -110,10 +112,15 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
 
   protected abstract fun updateDialog(dialogRef: DialogRef<ModalRenderingT>)
 
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    linkModalViewTreeOwners(dialogs)
+  }
+
   override fun onSaveInstanceState(): Parcelable {
     return SavedState(
-        super.onSaveInstanceState()!!,
-        dialogs.map { it.save() }
+      super.onSaveInstanceState()!!,
+      dialogs.map { it.save() }
     )
   }
 
@@ -126,6 +133,11 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
         super.onRestoreInstanceState(state.superState)
       }
       ?: super.onRestoreInstanceState(state)
+  }
+
+  /** @see [linkViewTreeOwners] */
+  private fun linkModalViewTreeOwners(dialogs: List<DialogRef<*>>) {
+    linkViewTreeOwners(this, dialogs.asSequence().map { it.dialog.decorView!! })
   }
 
   internal data class KeyAndBundle(

@@ -15,6 +15,7 @@ import com.squareup.workflow1.ui.internal.test.AbstractLifecycleTestActivity.Lea
 @OptIn(WorkflowUiExperimentalApi::class)
 internal class ViewStateTestView(context: Context) : LeafView<LeafRendering>(context) {
 
+  /** View state that is saved via [onSaveInstanceState]. */
   var viewState: String = ""
 
   override fun onSaveInstanceState(): Parcelable {

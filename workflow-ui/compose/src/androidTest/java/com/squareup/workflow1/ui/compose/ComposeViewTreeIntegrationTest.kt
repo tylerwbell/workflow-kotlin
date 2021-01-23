@@ -27,6 +27,8 @@ import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 import com.squareup.workflow1.ui.backstack.BackStackScreen
 import com.squareup.workflow1.ui.bindShowRendering
 import com.squareup.workflow1.ui.internal.test.WorkflowUiTestActivity
+import com.squareup.workflow1.ui.modal.HasModals
+import com.squareup.workflow1.ui.modal.ModalViewContainer
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -45,6 +47,7 @@ internal class ComposeViewTreeIntegrationTest {
           ViewRegistry to ViewRegistry(
             NoTransitionBackStackContainer,
             NamedViewFactory,
+            ModalViewContainer.binding<TestModals>()
           )
         )
       )
@@ -157,8 +160,125 @@ internal class ComposeViewTreeIntegrationTest {
     }
   }
 
+  // region merging
+
+  @Test fun composition_state_is_restored_on_pop() {
+    var state: MutableState<String>? = null
+    val firstScreen =
+      ComposeRendering("first") {
+        val innerState = savedInstanceState { "hello world" }
+        DisposableEffect(Unit) {
+          state = innerState
+          onDispose { state = null }
+        }
+      }
+    val secondScreen =
+      ComposeRendering("second") {}
+
+    // Show first screen to initialize state.
+    scenario.onActivity {
+      it.setBackstack(firstScreen)
+    }
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("hello world")
+    }
+    state!!.value = "saved"
+
+    // Navigate away.
+    scenario.onActivity {
+      it.setBackstack(firstScreen, secondScreen)
+    }
+    composeRule.runOnIdle {
+      assertThat(state).isNull()
+    }
+
+    // Navigate back to restore state.
+    scenario.onActivity {
+      it.setBackstack(firstScreen)
+    }
+
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("saved")
+    }
+  }
+
+  @Test fun composition_state_is_restored_on_pop_after_config_change() {
+    var state: MutableState<String>? = null
+    val firstScreen =
+      ComposeRendering("first") {
+        val innerState = savedInstanceState { "hello world" }
+        DisposableEffect(Unit) {
+          state = innerState
+          onDispose { state = null }
+        }
+      }
+    val secondScreen = ComposeRendering("second") {}
+
+    // Show first screen to initialize state.
+    scenario.onActivity {
+      it.setBackstack(firstScreen)
+    }
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("hello world")
+    }
+    state!!.value = "saved"
+
+    // Navigate away.
+    scenario.onActivity {
+      it.setBackstack(firstScreen, secondScreen)
+    }
+    composeRule.runOnIdle {
+      assertThat(state).isNull()
+    }
+
+    // Simulate config change.
+    scenario.recreate()
+
+    // Navigate back to restore state.
+    scenario.onActivity {
+      it.setBackstack(firstScreen)
+    }
+
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("saved")
+    }
+  }
+
+  @Test fun composition_state_is_restored_in_modal_after_config_change() {
+    var state: MutableState<String>? = null
+    val firstScreen = ComposeRendering("first") {
+      val innerState = savedInstanceState { "hello world" }
+      DisposableEffect(Unit) {
+        state = innerState
+        onDispose { state = null }
+      }
+    }
+
+    // Show first screen to initialize state.
+    scenario.onActivity {
+      it.setModals(firstScreen)
+    }
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("hello world")
+    }
+    state!!.value = "saved"
+
+    // Simulate config change.
+    scenario.recreate()
+
+    composeRule.runOnIdle {
+      assertThat(state!!.value).isEqualTo("saved")
+    }
+  }
+
+  // endregion
+
   private fun WorkflowUiTestActivity.setBackstack(vararg backstack: ComposeRendering) {
     setRendering(BackStackScreen(EmptyRendering, backstack.asList()))
+  }
+
+  private fun WorkflowUiTestActivity.setModals(vararg modals: ComposeRendering) {
+    setRendering(TestModals(modals.asList()))
   }
 
   data class ComposeRendering(
@@ -180,6 +300,9 @@ internal class ComposeViewTreeIntegrationTest {
       return ComposeView(contextForNewView).apply {
         lastCompositionStrategy?.let(::setViewCompositionStrategy)
 
+        // Need to set the hash code for persistence.
+        id = initialRendering.compatibilityKey.hashCode()
+
         bindShowRendering(initialRendering, initialViewEnvironment) { rendering, _ ->
           if (rendering.disposeStrategy != lastCompositionStrategy) {
             lastCompositionStrategy = rendering.disposeStrategy
@@ -190,6 +313,12 @@ internal class ComposeViewTreeIntegrationTest {
         }
       }
     }
+  }
+
+  private data class TestModals(
+    override val modals: List<ComposeRendering>
+  ) : HasModals<ComposeRendering, ComposeRendering> {
+    override val beneathModals: ComposeRendering get() = EmptyRendering
   }
 
   companion object {
