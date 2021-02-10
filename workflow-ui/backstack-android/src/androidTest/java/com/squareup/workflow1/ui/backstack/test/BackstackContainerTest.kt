@@ -332,6 +332,11 @@ internal class BackstackContainerTest {
     }
   }
 
+  // TODO rename
+  @Test fun duplicate_view_ids() {
+    // val firstScreen = LeafRe
+  }
+
   // endregion
   // region Lifecycle integration tests
 
