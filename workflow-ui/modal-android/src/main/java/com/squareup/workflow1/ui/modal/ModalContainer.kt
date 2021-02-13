@@ -3,21 +3,25 @@ package com.squareup.workflow1.ui.modal
 import android.app.Dialog
 import android.content.Context
 import android.os.Bundle
-import android.os.Parcel
-import android.os.Parcelable
-import android.os.Parcelable.Creator
 import android.util.AttributeSet
 import android.view.View
-import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.FrameLayout
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.Lifecycle.Event
+import androidx.lifecycle.Lifecycle.Event.ON_CREATE
 import androidx.lifecycle.Lifecycle.Event.ON_DESTROY
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.OnLifecycleEvent
+import androidx.savedstate.SavedStateRegistry
 import com.squareup.workflow1.ui.Named
 import com.squareup.workflow1.ui.ViewEnvironment
+import com.squareup.workflow1.ui.ViewStateFrame
+import com.squareup.workflow1.ui.WorkflowAndroidXSupport.compositeViewIdKey
 import com.squareup.workflow1.ui.WorkflowAndroidXSupport.lifecycleOwnerFromViewTreeOrContext
+import com.squareup.workflow1.ui.WorkflowAndroidXSupport.savedStateRegistryOwnerFromViewTreeOrContext
 import com.squareup.workflow1.ui.WorkflowLifecycleOwner
 import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 import com.squareup.workflow1.ui.WorkflowViewStub
@@ -37,13 +41,36 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
   defStyleRes: Int = 0
 ) : FrameLayout(context, attributeSet, defStyle, defStyleRes) {
 
+  /**
+   * Wrap the [baseViewStub] in another view, since [WorkflowViewStub] swaps itself out for its
+   * child view, but we need a stable reference to its view subtree to set up ViewTreeOwners.
+   * Wrapping with a container view is simpler than trying to make always make sure we keep
+   * [baseViewStub]'s [actual][WorkflowViewStub.actual] view updated.
+   *
+   * Note that this isn't a general problem that needs to be solved for WVS, it's only because we're
+   * using it as a direct child of a container. This can't happen through the ViewRegistry since
+   * no view factories should ever return a WVS.
+   */
+  private val baseContainer = FrameLayout(context).also {
+    // We need to install here so that the baseStateFrame can read it.
+    // We never need to call destroyOnDetach for this owner though, since we never replace it and
+    // so the only way it can be destroyed is if our parent lifecycle gets destroyed.
+    WorkflowLifecycleOwner.installOn(it)
+    addView(it, LayoutParams(MATCH_PARENT, MATCH_PARENT))
+  }
+
   private val baseViewStub: WorkflowViewStub = WorkflowViewStub(context).also {
-    addView(it, ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+    baseContainer.addView(it, LayoutParams(MATCH_PARENT, MATCH_PARENT))
   }
 
   private var dialogs: List<DialogRef<ModalRenderingT>> = emptyList()
-
   private val parentLifecycleOwner by lazy(NONE) { WorkflowLifecycleOwner.get(this) }
+
+  private val baseStateFrame = ViewStateFrame("base").also {
+    it.attach(baseContainer)
+  }
+
+  private var isRestored = false
 
   protected fun update(
     newScreen: HasModals<*, ModalRenderingT>,
@@ -54,8 +81,10 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
     val newDialogs = mutableListOf<DialogRef<ModalRenderingT>>()
     for ((i, modal) in newScreen.modals.withIndex()) {
       newDialogs += if (i < dialogs.size && compatible(dialogs[i].modalRendering, modal)) {
-        dialogs[i].copy(modalRendering = modal, viewEnvironment = viewEnvironment)
-          .also { updateDialog(it) }
+        dialogs[i].withUpdate(modal, viewEnvironment)
+          .also {
+            updateDialog(it)
+          }
       } else {
         buildDialog(modal, viewEnvironment).also { ref ->
           ref.dialog.decorView?.let { dialogView ->
@@ -69,11 +98,25 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
               findParentLifecycle = { parentLifecycleOwner?.lifecycle }
             )
 
+            ref.initFrame()
+            // This must be done after installing the WLO, because it assumes that the WLO has
+            // already been installed.
+            ref.frame.attach(dialogView)
+            if (isRestored) {
+              // Need to initialize the saved state registry even though we're not actually
+              // restoring. However if we haven't been restored yet, then this call will be made
+              // by restoreFromBundle.
+              ref.frame.restoreAndroidXStateRegistry()
+            }
+
             dialogView.addOnAttachStateChangeListener(
               object : OnAttachStateChangeListener {
                 val onDestroy = OnDestroy { ref.dismiss() }
                 var lifecycle: Lifecycle? = null
                 override fun onViewAttachedToWindow(v: View) {
+                  println("OMG MC dialog attached to window")
+                  dumpState()
+
                   // Note this is a different lifecycle than the WorkflowLifecycleOwner – it will
                   // probably be the owning AppCompatActivity.
                   lifecycle = ref.dialog.decorView
@@ -85,6 +128,7 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
                 }
 
                 override fun onViewDetachedFromWindow(v: View) {
+                  println("OMG MC dialog detached from window")
                   lifecycle?.removeObserver(onDestroy)
                   lifecycle = null
                 }
@@ -100,6 +144,21 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
 
     (dialogs - newDialogs).forEach { it.dismiss() }
     dialogs = newDialogs
+
+    println("OMG MC finished update")
+    dumpState()
+  }
+
+  @OptIn(ExperimentalStdlibApi::class)
+  private fun dumpState() {
+    println("OMG MC state:")
+    val lines = buildList {
+      add("${baseStateFrame.key}: $baseStateFrame")
+      dialogs.forEach {
+        add("${it.frame.key}: ${it.frame}")
+      }
+    }
+    println(lines.joinToString(separator = "\n") { "OMG   $it" })
   }
 
   /**
@@ -112,57 +171,108 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
 
   protected abstract fun updateDialog(dialogRef: DialogRef<ModalRenderingT>)
 
+  private val stateRegistryKey by lazy(NONE) {
+    val stateRegistryPrefix = compositeViewIdKey(this)
+    "$stateRegistryPrefix/${ModalContainer::class.java.simpleName}"
+  }
+  private lateinit var parentStateRegistry: SavedStateRegistry
+
   override fun onAttachedToWindow() {
-    super.onAttachedToWindow()
-    linkModalViewTreeOwners(dialogs)
-  }
+    // TODO more graceful null handling
+    val registryOwner = savedStateRegistryOwnerFromViewTreeOrContext(this)!!
+    parentStateRegistry = registryOwner.savedStateRegistry
+    parentStateRegistry.registerSavedStateProvider(stateRegistryKey, ::saveToBundle)
 
-  override fun onSaveInstanceState(): Parcelable {
-    return SavedState(
-      super.onSaveInstanceState()!!,
-      dialogs.map { it.save() }
-    )
-  }
-
-  override fun onRestoreInstanceState(state: Parcelable) {
-    (state as? SavedState)
-      ?.let {
-        if (it.dialogBundles.size == dialogs.size) {
-          it.dialogBundles.zip(dialogs) { viewState, dialogRef -> dialogRef.restore(viewState) }
+    registryOwner.lifecycle.addObserver(object : LifecycleEventObserver {
+      override fun onStateChanged(
+        source: LifecycleOwner,
+        event: Event
+      ) {
+        println("OMG MC got event: $event")
+        if (event == ON_CREATE) {
+          // source.lifecycle.removeObserver(this)
+          parentStateRegistry.consumeRestoredStateForKey(stateRegistryKey)
+            .let(::restoreFromBundle)
         }
-        super.onRestoreInstanceState(state.superState)
       }
-      ?: super.onRestoreInstanceState(state)
+    })
+
+    linkModalViewTreeOwners(dialogs)
+
+    // TODO document why this has to be at the end
+    super.onAttachedToWindow()
+  }
+
+  override fun onDetachedFromWindow() {
+    println("OMG MC detached")
+    dumpState()
+    parentStateRegistry.unregisterSavedStateProvider(stateRegistryKey)
+    super.onDetachedFromWindow()
+  }
+
+  private fun saveToBundle(): Bundle = Bundle().apply {
+    println("OMG MC saving to bundle")
+    dumpState()
+
+    // Don't need to save the base view's hierarchy state, the view system will automatically do
+    // that.
+    baseStateFrame.performSave(saveViewHierarchyState = false)
+    putParcelable("base", baseStateFrame)
+
+    dialogs.forEachIndexed { index, dialogRef ->
+      // TODO this is calling saveHierarchyState on the decor view, not on the window, as the
+      //  previous code did. Is that a problem?
+      dialogRef.frame.performSave(saveViewHierarchyState = true)
+      putParcelable(index.toString(), dialogRef.frame)
+    }
+  }
+
+  /**
+   * This is called as soon as the view is attached and the lifecycle is in the CREATED state.
+   */
+  private fun restoreFromBundle(bundle: Bundle?) {
+    println("OMG MC restoring from bundle: $bundle")
+    require(!isRestored) {
+      "Expected restoreFromBundle to only be called once."
+    }
+    isRestored = true
+
+    if (bundle == null) {
+      // This always has to be called so consume doesn't throw, even if we don't actually have
+      // anything to restore.
+      baseStateFrame.restoreAndroidXStateRegistry()
+      return
+    }
+
+    val restoredBaseFrame = bundle.getParcelable<ViewStateFrame>("base")!!
+    baseStateFrame.loadAndroidXStateRegistryFrom(restoredBaseFrame)
+    baseStateFrame.restoreAndroidXStateRegistry()
+    // Don't need to restore the hierarchy state, the view system will automatically do that.
+
+    dialogs.forEachIndexed { index, dialogRef ->
+      val frame = bundle.getParcelable<ViewStateFrame>(index.toString())
+      // Once we hit an index that doesn't exist, there will be no more entries to process so we
+      // can exit early.
+        ?: return
+
+      dialogRef.frame.loadAndroidXStateRegistryFrom(frame)
+      dialogRef.frame.restoreAndroidXStateRegistry()
+      // TODO this is calling restoreHierarchyState on the decor view, not the window as the
+      //  previous code did. Is that a problem?
+      // TODO this is probably too early to make this call, need to wait until we get
+      //  onRestoreHierarchyState
+      dialogRef.frame.restoreViewHierarchyState()
+    }
+
+    println("OMG MC restored from bundle")
+    dumpState()
   }
 
   /** @see [linkViewTreeOwners] */
   private fun linkModalViewTreeOwners(dialogs: List<DialogRef<*>>) {
-    linkViewTreeOwners(this, dialogs.asSequence().map { it.dialog.decorView!! })
-  }
-
-  internal data class KeyAndBundle(
-    val compatibilityKey: String,
-    val bundle: Bundle
-  ) : Parcelable {
-    override fun describeContents(): Int = 0
-
-    override fun writeToParcel(
-      parcel: Parcel,
-      flags: Int
-    ) {
-      parcel.writeString(compatibilityKey)
-      parcel.writeBundle(bundle)
-    }
-
-    companion object CREATOR : Creator<KeyAndBundle> {
-      override fun createFromParcel(parcel: Parcel): KeyAndBundle {
-        val key = parcel.readString()!!
-        val bundle = parcel.readBundle(KeyAndBundle::class.java.classLoader)!!
-        return KeyAndBundle(key, bundle)
-      }
-
-      override fun newArray(size: Int): Array<KeyAndBundle?> = arrayOfNulls(size)
-    }
+    linkViewTreeOwners(this, dialogs.asSequence().map {
+      Pair(it.dialog.decorView!!, it.frame)
+    })
   }
 
   /**
@@ -170,21 +280,25 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
    * e.g. its content view. Not considered for equality.
    */
   @WorkflowUiExperimentalApi
-  protected data class DialogRef<ModalRenderingT : Any>(
-    val modalRendering: ModalRenderingT,
-    val viewEnvironment: ViewEnvironment,
-    val dialog: Dialog,
-    val extra: Any? = null
+  protected class DialogRef<ModalRenderingT : Any>(
+    public val modalRendering: ModalRenderingT,
+    public val viewEnvironment: ViewEnvironment,
+    public val dialog: Dialog,
+    public val extra: Any? = null
   ) {
-    internal fun save(): KeyAndBundle {
-      val saved = dialog.window!!.saveHierarchyState()
-      return KeyAndBundle(Named.keyFor(modalRendering), saved)
+    private val key get() = Named.keyFor(modalRendering, "modal")
+
+    internal lateinit var frame: ViewStateFrame
+
+    internal fun initFrame() {
+      frame = ViewStateFrame(key)
     }
 
-    internal fun restore(keyAndBundle: KeyAndBundle) {
-      if (Named.keyFor(modalRendering) == keyAndBundle.compatibilityKey) {
-        dialog.window!!.restoreHierarchyState(keyAndBundle.bundle)
-      }
+    internal fun withUpdate(
+      rendering: ModalRenderingT,
+      environment: ViewEnvironment
+    ) = DialogRef(rendering, environment, dialog, extra).also {
+      it.frame = frame
     }
 
     /**
@@ -195,6 +309,7 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
       // The dialog's views are about to be detached, and when that happens we want to transition
       // the dialog view's lifecycle to a terminal state even though the parent is probably still
       // alive.
+      println("OMG MC destroying modal on detach: $key")
       dialog.decorView?.let(WorkflowLifecycleOwner::get)?.destroyOnDetach()
       dialog.dismiss()
     }
@@ -212,40 +327,6 @@ public abstract class ModalContainer<ModalRenderingT : Any> @JvmOverloads constr
 
     override fun hashCode(): Int {
       return dialog.hashCode()
-    }
-  }
-
-  private class SavedState : BaseSavedState {
-    constructor(
-      superState: Parcelable?,
-      dialogBundles: List<KeyAndBundle>
-    ) : super(superState) {
-      this.dialogBundles = dialogBundles
-    }
-
-    constructor(source: Parcel) : super(source) {
-      @Suppress("UNCHECKED_CAST")
-      this.dialogBundles = mutableListOf<KeyAndBundle>().apply {
-        source.readTypedList(this, KeyAndBundle)
-      }
-    }
-
-    val dialogBundles: List<KeyAndBundle>
-
-    override fun writeToParcel(
-      out: Parcel,
-      flags: Int
-    ) {
-      super.writeToParcel(out, flags)
-      @Suppress("NULLABILITY_MISMATCH_BASED_ON_JAVA_ANNOTATIONS")
-      out.writeTypedList(dialogBundles)
-    }
-
-    companion object CREATOR : Creator<SavedState> {
-      override fun createFromParcel(source: Parcel): SavedState =
-        SavedState(source)
-
-      override fun newArray(size: Int): Array<SavedState?> = arrayOfNulls(size)
     }
   }
 }

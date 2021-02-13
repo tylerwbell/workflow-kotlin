@@ -3,19 +3,23 @@ package com.squareup.workflow1.ui.backstack
 import android.os.Bundle
 import android.view.View
 import android.view.View.OnAttachStateChangeListener
-import android.view.ViewGroup
 import androidx.annotation.VisibleForTesting
 import androidx.annotation.VisibleForTesting.PRIVATE
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.Lifecycle.Event
 import androidx.lifecycle.Lifecycle.Event.ON_CREATE
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistry.SavedStateProvider
 import androidx.savedstate.SavedStateRegistryOwner
 import com.squareup.workflow1.ui.Named
+import com.squareup.workflow1.ui.ViewStateFrame
+import com.squareup.workflow1.ui.WorkflowAndroidXSupport.compositeViewIdKey
 import com.squareup.workflow1.ui.WorkflowAndroidXSupport.savedStateRegistryOwnerFromViewTreeOrContext
 import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 import com.squareup.workflow1.ui.getRendering
+import kotlin.LazyThreadSafetyMode.NONE
 
 /**
  * Handles persistence chores for container views that manage a set of [Named] renderings,
@@ -162,20 +166,20 @@ internal constructor(
    * to a bundle, and returns it. The result can be passed to [restoreFromBundle].
    */
   @VisibleForTesting(otherwise = PRIVATE)
-  internal fun saveToBundle(): Bundle {
-    return Bundle().apply {
-      currentFrame?.let {
-        // First ask the current SavedStateRegistry to save its state providers.
-        // We don't need to save the view hierarchy here because the current view will already have
-        // its state saved by the regular view tree traversal.
-        it.performSave(saveViewHierarchyState = false)
-        putParcelable(it.key, it)
-      }
-
-      hiddenViewStates.forEach { (key, frame) ->
-        putParcelable(key, frame)
-      }
+  internal fun saveToBundle(): Bundle = Bundle().apply {
+    currentFrame?.let {
+      // First ask the current SavedStateRegistry to save its state providers.
+      // We don't need to save the view hierarchy here because the current view will already have
+      // its state saved by the regular view tree traversal.
+      it.performSave(saveViewHierarchyState = false)
+      putParcelable(it.key, it)
     }
+
+    hiddenViewStates.forEach { (key, frame) ->
+      putParcelable(key, frame)
+    }
+
+    println("OMG VSC saved to bundle: $this")
   }
 
   /**
@@ -184,10 +188,13 @@ internal constructor(
    * registry. If [update] has not been called, the registry data is still loaded, but will be
    * sent to the actual registry when it's created by [update].
    *
-   * Called as soon as the lifecycle has moved to the CREATED state.
+   * This method gets called as soon as the lifecycle has moved to the CREATED state. This is
+   * necessary because the child state registries must be restored before they see the CREATED state
+   * in order to fulfill the SavedStateRegistry contract.
    */
   @VisibleForTesting(otherwise = PRIVATE)
   internal fun restoreFromBundle(bundle: Bundle?) {
+    println("OMG VSC restoring from bundle: $bundle")
     require(!isRestored)
     isRestored = true
 
@@ -196,7 +203,7 @@ internal constructor(
     bundle?.keySet()?.forEach { key ->
       val frame = bundle.getParcelable<ViewStateFrame>(key)!!
       if (key == currentFrame?.key) {
-        // This just passes the data to the frame, it doesn't actually tell the
+        // This just passes the data to the frame, it doesn't actually tell the TODO
         currentFrame!!.loadAndroidXStateRegistryFrom(frame)
       } else {
         hiddenViewStates[key] = frame
@@ -213,10 +220,20 @@ internal constructor(
   private inner class ViewStateListener(private val view: View) : OnAttachStateChangeListener,
     LifecycleEventObserver,
     SavedStateProvider {
-    // This is the same key format that AndroidComposeView uses.
-    private val stateRegistryKey get() = "${ViewStateCache::class.java.simpleName}:${view.compositeStateKey()}"
+
+    /**
+     * TODO kdoc
+     */
+    private val stateRegistryKey by lazy(NONE) {
+      val compositeIdKey = compositeViewIdKey(view)
+      "$compositeIdKey/${ViewStateCache::class.java.simpleName}"
+    }
+
+    private   var parentRegistry: SavedStateRegistry? = null
+    private  var parentLifecycle: Lifecycle? = null
 
     override fun onViewAttachedToWindow(v: View) {
+      println("OMG VSC attached to window")
       require(view.id != View.NO_ID) {
         "Expected BackStackContainer to have an ID set for view state restoration."
       }
@@ -226,6 +243,8 @@ internal constructor(
           "Expected to find either a ViewTreeSavedStateRegistryOwner in the view tree, or a " +
             "SavedStateRegistryOwner in the Context chain."
         }
+      parentLifecycle = parentSavedStateRegistryOwner!!.lifecycle
+      parentRegistry = parentSavedStateRegistryOwner!!.savedStateRegistry
 
       // We can only restore once, so if we're already restored we don't care about the parent
       // registry or lifecycle.
@@ -235,20 +254,32 @@ internal constructor(
       // The SavedStateRegistry contract says we can't read our restored state back from the
       // registry until after the lifecycle moves to the CREATED state, so we have to wait for that
       // to happen instead of just restoring directly here.
-      parentSavedStateRegistryOwner!!.lifecycle.addObserver(this)
+      parentLifecycle!!.addObserver(this)
 
       val rendering = view.getRendering<Any>()
-      println("OMG state key for $rendering : $stateRegistryKey")
+      println("OMG VSC state key for $rendering : $stateRegistryKey")
 
-      parentSavedStateRegistryOwner!!.savedStateRegistry
+      parentRegistry!!
         // TODO add unit test that fails when these keys are not unique
-        .registerSavedStateProvider(stateRegistryKey, this)
+        .also {
+          // The exception thrown by this function doesn't include the key so it's not helpful for
+          // debugging. If it throws, we wrap it with a more descriptive exception.
+          try {
+            it.registerSavedStateProvider(stateRegistryKey, this)
+          } catch (e: Exception) {
+            throw IllegalArgumentException(
+              "Error registering SavedStateProvider for key: $stateRegistryKey", e
+            )
+          }
+        }
     }
 
     override fun onViewDetachedFromWindow(v: View) {
-      parentSavedStateRegistryOwner?.savedStateRegistry
-        ?.unregisterSavedStateProvider(stateRegistryKey)
-      parentSavedStateRegistryOwner?.lifecycle?.removeObserver(this)
+      println("OMG VSC detached from window")
+      parentRegistry?.unregisterSavedStateProvider(stateRegistryKey)
+      parentLifecycle?.removeObserver(this)
+      parentRegistry = null
+      parentLifecycle=null
       parentSavedStateRegistryOwner = null
     }
 
@@ -256,9 +287,11 @@ internal constructor(
       source: LifecycleOwner,
       event: Event
     ) {
+      println("OMG VSC got lifecycle event: $event")
       if (event == ON_CREATE) {
         // We can now read from our parent's saved state registry.
         val registry = parentSavedStateRegistryOwner!!.savedStateRegistry
+        println("OMG VSC about to consume state for key: $stateRegistryKey")
         val restoredBundle = registry.consumeRestoredStateForKey(stateRegistryKey)
         restoreFromBundle(restoredBundle)
         parentSavedStateRegistryOwner!!.lifecycle.removeObserver(this)
@@ -278,20 +311,3 @@ private val View.namedKey: String
         "found $rendering"
     }
   }
-
-/**
- * Computes a string key for using with a `SavedStateRegistry` that will be globally unique.
- * Requires View IDs to be set for any views that are siblings and have the same rendering type.
- * The key is generated by combining the rendering [compatibility keys][Named.keyFor] of each
- * rendering starting with the current one and going up the view tree to the root. Each rendering
- * key is also associated with the ID of the [View] it's tagged on.
- */
-@OptIn(WorkflowUiExperimentalApi::class)
-private fun View.compositeStateKey(): String {
-  return generateSequence(this) { it.parent as? ViewGroup }
-    .filter { it.getRendering<Any>() != null }
-    .map { Named.keyFor(it.getRendering()!!, it.id.toString()) }
-    .toList()
-    .asReversed()
-    .joinToString("/")
-}

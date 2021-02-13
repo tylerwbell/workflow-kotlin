@@ -1,4 +1,4 @@
-package com.squareup.workflow1.ui.backstack
+package com.squareup.workflow1.ui
 
 import android.os.Bundle
 import android.os.Parcel
@@ -18,10 +18,8 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.ViewTreeSavedStateRegistryOwner
-import com.squareup.workflow1.ui.WorkflowLifecycleOwner
-import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
-import com.squareup.workflow1.ui.backstack.ViewStateFrame.AttachState.Attached
-import com.squareup.workflow1.ui.backstack.ViewStateFrame.AttachState.Detached
+import com.squareup.workflow1.ui.ViewStateFrame.AttachState.Attached
+import com.squareup.workflow1.ui.ViewStateFrame.AttachState.Detached
 
 /**
  * Used by [ViewStateCache] to record the [viewState] data for the view identified
@@ -36,14 +34,14 @@ import com.squareup.workflow1.ui.backstack.ViewStateFrame.AttachState.Detached
  * [Attached] when it's managing a visible view.
  */
 @OptIn(WorkflowUiExperimentalApi::class)
-internal class ViewStateFrame(
-  val key: String,
+public class ViewStateFrame(
+  public val key: String,
   @VisibleForTesting(otherwise = PRIVATE)
-  var viewState: SparseArray<Parcelable>?,
+  public var viewState: SparseArray<Parcelable>?,
   @VisibleForTesting(otherwise = PRIVATE)
-  var androidXBundle: Bundle?
+  public var androidXBundle: Bundle?
 ) : Parcelable, SavedStateRegistryOwner, WorkflowLifecycleOwner {
-  constructor(key: String) : this(key, null, null)
+  public constructor(key: String) : this(key, null, null)
 
   private sealed class AttachState {
     /**
@@ -79,7 +77,8 @@ internal class ViewStateFrame(
    * for the view. It will read the [WorkflowLifecycleOwner] and then replace it with this
    * [ViewStateFrame].
    */
-  fun attach(view: View) {
+  public fun attach(view: View) {
+    println("OMG VSF attached to view: $key")
     require(attachState is Detached) {
       "Expected attach to only be called once per view."
     }
@@ -96,6 +95,7 @@ internal class ViewStateFrame(
         source: LifecycleOwner,
         event: Event
       ) {
+        println("OMG VSF got event: $key $event")
         if (event == ON_DESTROY) {
           changeToDetachedState()
         }
@@ -111,7 +111,7 @@ internal class ViewStateFrame(
    *
    * This method can be called regardless of attached state.
    */
-  fun loadAndroidXStateRegistryFrom(frame: ViewStateFrame?) {
+  public fun loadAndroidXStateRegistryFrom(frame: ViewStateFrame?) {
     require(frame == null || key == frame.key) {
       "Expected frame's key to match: $key != ${frame!!.key}"
     }
@@ -123,10 +123,16 @@ internal class ViewStateFrame(
 
   /**
    * Invokes [SavedStateRegistryController.performRestore] on the [SavedStateRegistryController]
-   * owned by this frame. This _must_ always be called before calling [performSave] or an exception
-   * will be thrown. It may only be called between [attach] and [destroyOnDetach].
+   * owned by this frame.
+   *
+   * This _must_ always be called:
+   *  - before the attached view has a chance to call
+   *    [SavedStateRegistry.consumeRestoredStateForKey].
+   *  - before calling [performSave] or an exception will be thrown.
+   *
+   * It may only be called between [attach] and [destroyOnDetach].
    */
-  fun restoreAndroidXStateRegistry() {
+  public fun restoreAndroidXStateRegistry() {
     // Controller must _always_ be restored, even if there's no data, so that consume doesn't
     // throw.
     requireAttached().savedStateController
@@ -140,7 +146,7 @@ internal class ViewStateFrame(
    * This method should be called as soon as the view is created that it owns the state for, and it
    * _must_ be called before [performSave].
    */
-  fun restoreViewHierarchyState() {
+  public fun restoreViewHierarchyState() {
     // When this method is called to restore a previously-hidden view, this will perform the
     // restore. If viewState is null, this call is happening as part of the entire activity restore,
     // and the Android framework will call restoreHierarchyState for us.
@@ -153,7 +159,7 @@ internal class ViewStateFrame(
    *
    * [restoreAndroidXStateRegistry] _must_ be called before this method.
    */
-  fun performSave(saveViewHierarchyState: Boolean) {
+  public fun performSave(saveViewHierarchyState: Boolean) {
     requireAttached().apply {
       androidXBundle = Bundle().also(savedStateController::performSave)
 
@@ -168,6 +174,10 @@ internal class ViewStateFrame(
   }
 
   private fun changeToDetachedState() {
+    println("OMG VSF changing to detached: $key")
+    // Thread.currentThread().stackTrace.asList().joinToString("\n") { "OMG   $it" }
+    //   .let { println(it) }
+
     requireAttached().view.let { view ->
       ViewTreeLifecycleOwner.set(view, null)
       ViewTreeSavedStateRegistryOwner.set(view, null)
@@ -189,10 +199,15 @@ internal class ViewStateFrame(
     parcel.writeBundle(androidXBundle)
   }
 
+  override fun toString(): String =
+    "${ViewStateFrame::class.java.simpleName}(key=$key, " +
+      "attachState=$attachState, " +
+      "lifecycle=${(attachState as? Attached)?.lifecycleOwner?.lifecycle?.currentState})"
+
   private fun requireAttached(): Attached =
     attachState as? Attached ?: error("Expected ViewStateFrame to be attached to view.")
 
-  companion object CREATOR : Creator<ViewStateFrame> {
+  public companion object CREATOR : Creator<ViewStateFrame> {
     override fun createFromParcel(parcel: Parcel): ViewStateFrame {
       val key = parcel.readString()!!
       val classLoader = ViewStateFrame::class.java.classLoader

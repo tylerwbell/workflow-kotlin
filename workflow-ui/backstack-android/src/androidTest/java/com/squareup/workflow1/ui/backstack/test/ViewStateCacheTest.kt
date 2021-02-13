@@ -17,7 +17,7 @@ import com.squareup.workflow1.ui.ViewEnvironment
 import com.squareup.workflow1.ui.WorkflowLifecycleOwner
 import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 import com.squareup.workflow1.ui.backstack.ViewStateCache
-import com.squareup.workflow1.ui.backstack.ViewStateFrame
+import com.squareup.workflow1.ui.ViewStateFrame
 import com.squareup.workflow1.ui.backstack.test.fixtures.ViewStateTestView
 import com.squareup.workflow1.ui.bindShowRendering
 import com.squareup.workflow1.ui.internal.test.requireStateRegistry

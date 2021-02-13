@@ -3,13 +3,10 @@ package com.squareup.workflow1.ui.modal
 import android.content.Context
 import android.content.ContextWrapper
 import android.view.View
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.ViewTreeViewModelStoreOwner
-import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.ViewTreeSavedStateRegistryOwner
-import com.squareup.workflow1.ui.WorkflowAndroidXSupport.savedStateRegistryOwnerFromViewTreeOrContext
 import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 
 /**
@@ -29,21 +26,15 @@ import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 @OptIn(WorkflowUiExperimentalApi::class)
 internal fun linkViewTreeOwners(
   anchorView: View,
-  rootViews: Sequence<View>
+  rootViews: Sequence<Pair<View, SavedStateRegistryOwner>>
 ) {
   val context = anchorView.context
-  val parentSavedStateRegistryOwner = savedStateRegistryOwnerFromViewTreeOrContext(anchorView)
+  // val parentSavedStateRegistryOwner = savedStateRegistryOwnerFromViewTreeOrContext(anchorView)
   val parentViewModelStore = ViewTreeViewModelStoreOwner.get(anchorView)
     ?: context?.viewModelStoreOwnerOrNull()
 
-  rootViews.forEach { rootView ->
-    // Forward the SavedStateRegistryOwner.
-    parentSavedStateRegistryOwner?.let {
-      ViewTreeSavedStateRegistryOwner.set(rootView, object : SavedStateRegistryOwner {
-        override fun getLifecycle(): Lifecycle = it.lifecycle
-        override fun getSavedStateRegistry(): SavedStateRegistry = it.savedStateRegistry
-      })
-    }
+  rootViews.forEach { (rootView, registryOwner) ->
+    ViewTreeSavedStateRegistryOwner.set(rootView, registryOwner)
 
     // Forward the ViewModelStoreOwner.
     parentViewModelStore?.let {
