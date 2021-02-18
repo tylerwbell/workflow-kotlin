@@ -1,10 +1,12 @@
 package com.squareup.workflow1.internal
 
-import com.squareup.workflow1.BaseRenderContext
 import com.squareup.workflow1.ExperimentalWorkflowApi
 import com.squareup.workflow1.NoopWorkflowInterceptor
 import com.squareup.workflow1.Snapshot
+import com.squareup.workflow1.Workflow
+import com.squareup.workflow1.WorkflowAction
 import com.squareup.workflow1.WorkflowInterceptor
+import com.squareup.workflow1.WorkflowInterceptor.RenderContextInterceptor
 import com.squareup.workflow1.WorkflowInterceptor.WorkflowSession
 import kotlinx.coroutines.CoroutineScope
 
@@ -60,16 +62,22 @@ internal class ChainedWorkflowInterceptor(
   override fun <P, S, O, R> onRender(
     renderProps: P,
     renderState: S,
-    context: BaseRenderContext<P, S, O>,
-    proceed: (P, S, BaseRenderContext<P, S, O>) -> R,
+    proceed: (P, S, RenderContextInterceptor<P, S, O>?) -> R,
     session: WorkflowSession
   ): R {
     val chainedProceed = interceptors.foldRight(proceed) { workflowInterceptor, proceedAcc ->
-      { props, state, context ->
-        workflowInterceptor.onRender(props, state, context, proceedAcc, session)
+      { props, state, outerContextInterceptor ->
+        workflowInterceptor.onRender(
+          props, state,
+          proceed = { p, s, innerContextInterceptor: RenderContextInterceptor<P, S, O>? ->
+            val contextInterceptor = outerContextInterceptor.wrap(innerContextInterceptor)
+            proceedAcc(p, s, contextInterceptor)
+          },
+          session
+        )
       }
     }
-    return chainedProceed(renderProps, renderState, context)
+    return chainedProceed(renderProps, renderState, null)
   }
 
   override fun <S> onSnapshotState(
@@ -83,5 +91,51 @@ internal class ChainedWorkflowInterceptor(
       }
     }
     return chainedProceed(state)
+  }
+
+  private fun <P, S, O> RenderContextInterceptor<P, S, O>?.wrap(
+    inner: RenderContextInterceptor<P, S, O>?
+  ) = when {
+    this == null && inner == null -> null
+    this == null -> inner
+    inner == null -> this
+    else -> object : RenderContextInterceptor<P, S, O> {
+      // If we don't use !!, the compiler complains about the non-elvis dot accesses below.
+      @Suppress("UNNECESSARY_NOT_NULL_ASSERTION")
+      val outer = this@wrap!!
+
+      override fun onActionSent(
+        action: WorkflowAction<P, S, O>,
+        proceed: (WorkflowAction<P, S, O>) -> Unit
+      ) {
+        outer.onActionSent(action) { interceptedAction ->
+          inner.onActionSent(interceptedAction, proceed)
+        }
+      }
+
+      override fun <CP, CO, CR> onRenderChild(
+        child: Workflow<CP, CO, CR>,
+        props: CP,
+        key: String,
+        handler: (CO) -> WorkflowAction<P, S, O>,
+        proceed: (
+          child: Workflow<CP, CO, CR>,
+          props: CP,
+          key: String,
+          handler: (CO) -> WorkflowAction<P, S, O>
+        ) -> CR
+      ): CR = outer.onRenderChild(child, props, key, handler) { c, p, k, h ->
+        inner.onRenderChild(c, p, k, h, proceed)
+      }
+
+      override suspend fun onSideEffectRunning(
+        key: String,
+        proceed: suspend () -> Unit
+      ) {
+        outer.onSideEffectRunning(key) {
+          inner.onSideEffectRunning(key, proceed)
+        }
+      }
+    }
   }
 }

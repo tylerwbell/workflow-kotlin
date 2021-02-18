@@ -8,20 +8,22 @@ import com.squareup.workflow1.WorkflowInterceptor.WorkflowSession
  * Workflow interceptor that records all received events in a list for testing.
  */
 @OptIn(ExperimentalWorkflowApi::class)
-class RecordingWorkflowInterceptor : SimpleLoggingWorkflowInterceptor() {
+internal class RecordingWorkflowInterceptor : SimpleLoggingWorkflowInterceptor() {
 
   private var events: List<String> = emptyList()
 
   override fun logBeforeMethod(
     name: String,
-    session: WorkflowSession
+    session: WorkflowSession,
+    vararg extras: Pair<String, Any?>
   ) {
     events += "BEGIN|$name"
   }
 
   override fun logAfterMethod(
     name: String,
-    session: WorkflowSession
+    session: WorkflowSession,
+    vararg extras: Pair<String, Any?>
   ) {
     events += "END|$name"
   }

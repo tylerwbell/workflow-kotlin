@@ -31,7 +31,7 @@ import kotlin.test.fail
  * parameters and return value to ensure that all values are being threaded through appropriately.
  */
 @OptIn(ExperimentalWorkflowApi::class)
-class ChainedWorkflowInterceptorTest {
+internal class ChainedWorkflowInterceptorTest {
 
   @Test fun `chained() returns Noop when list is empty`() {
     val list = emptyList<WorkflowInterceptor>()

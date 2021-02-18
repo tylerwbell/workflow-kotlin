@@ -2,6 +2,8 @@
 
 package com.squareup.workflow1
 
+import com.squareup.workflow1.WorkflowInterceptor.Companion.interceptRenderContext
+import com.squareup.workflow1.WorkflowInterceptor.RenderContextInterceptor
 import com.squareup.workflow1.WorkflowInterceptor.WorkflowSession
 import kotlinx.coroutines.CoroutineScope
 import kotlin.test.Test
@@ -10,12 +12,12 @@ import kotlin.test.assertSame
 import kotlin.test.fail
 
 @OptIn(ExperimentalWorkflowApi::class)
-class WorkflowInterceptorTest {
+internal class WorkflowInterceptorTest {
 
   @Test fun `intercept() returns workflow when Noop`() {
     val interceptor = NoopWorkflowInterceptor
     val workflow = Workflow.rendering("hello")
-        .asStatefulWorkflow()
+      .asStatefulWorkflow()
     val intercepted = interceptor.intercept(workflow, workflow.session)
     assertSame(workflow, intercepted)
   }
@@ -73,8 +75,24 @@ class WorkflowInterceptorTest {
 
     assertEquals(Snapshot.of("state"), snapshot)
     assertEquals(
-        listOf("BEGIN|onSnapshotState", "END|onSnapshotState"), recorder.consumeEventNames()
+      listOf("BEGIN|onSnapshotState", "END|onSnapshotState"), recorder.consumeEventNames()
     )
+  }
+
+  @Test fun `interceptRenderContext intercepts calls to actionSink send`() {
+    TODO()
+  }
+
+  @Test fun `interceptRenderContext intercepts side effects`() {
+    TODO()
+  }
+
+  @Test fun `interceptRenderContext uses interceptor's context for side effect`() {
+    TODO()
+  }
+
+  @Test fun `interceptRenderContext throws when side effect job is changed`() {
+    TODO()
   }
 
   private val Workflow<*, *, *>.session: WorkflowSession
@@ -104,5 +122,20 @@ class WorkflowInterceptorTest {
     ): String = "$renderProps|$renderState"
 
     override fun snapshotState(state: String): Snapshot = Snapshot.of(state)
+  }
+
+  private abstract class ContextInterceptingInterceptor : WorkflowInterceptor {
+    protected abstract fun <P, S, O> interceptContext(): RenderContextInterceptor<P, S, O>
+
+    override fun <P, S, O, R> onRender(
+      renderProps: P,
+      renderState: S,
+      context: BaseRenderContext<P, S, O>,
+      proceed: (P, S, BaseRenderContext<P, S, O>) -> R,
+      session: WorkflowSession
+    ): R {
+      val interceptedContext = interceptRenderContext(context, interceptContext())
+      return proceed(renderProps, renderState, interceptedContext)
+    }
   }
 }
