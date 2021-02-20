@@ -8,7 +8,7 @@ import com.squareup.workflow1.WorkflowInterceptor.WorkflowSession
  * Workflow interceptor that records all received events in a list for testing.
  */
 @OptIn(ExperimentalWorkflowApi::class)
-internal class RecordingWorkflowInterceptor : SimpleLoggingWorkflowInterceptor() {
+internal open class RecordingWorkflowInterceptor : SimpleLoggingWorkflowInterceptor() {
 
   private var events: List<String> = emptyList()
 
@@ -28,7 +28,7 @@ internal class RecordingWorkflowInterceptor : SimpleLoggingWorkflowInterceptor()
     events += "END|$name"
   }
 
-  fun consumeEvents(): List<String> = events
+  private fun consumeEvents(): List<String> = events
       .also { events = emptyList() }
 
   fun consumeEventNames(): List<String> = consumeEvents().map { it.substringBefore('(') }
