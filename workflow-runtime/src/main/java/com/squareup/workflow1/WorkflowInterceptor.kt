@@ -307,7 +307,6 @@ private class InterceptedRenderContext<P, S, O>(
           // If the interceptor is wrapping the coroutine context, it can't change the job
           // because that could break structured concurrency.
           check(innerScope.coroutineContext.job in outerScope.coroutineContext.job.children) {
-            // TODO unit tests
             "Expected onSideEffectStarting not to call proceed with a different Job."
           }
           sideEffect()
