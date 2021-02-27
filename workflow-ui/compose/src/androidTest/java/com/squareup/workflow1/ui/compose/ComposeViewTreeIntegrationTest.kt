@@ -4,12 +4,9 @@ import android.content.Context
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
@@ -29,6 +26,7 @@ import androidx.compose.ui.platform.ViewCompositionStrategy.DisposeOnDetachedFro
 import androidx.compose.ui.platform.ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -36,7 +34,6 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import com.google.common.truth.Truth.assertThat
 import com.squareup.workflow1.ui.AndroidViewRendering
 import com.squareup.workflow1.ui.Compatible
@@ -48,13 +45,10 @@ import com.squareup.workflow1.ui.WorkflowUiExperimentalApi
 import com.squareup.workflow1.ui.backstack.BackStackScreen
 import com.squareup.workflow1.ui.bindShowRendering
 import com.squareup.workflow1.ui.internal.test.WorkflowUiTestActivity
+import com.squareup.workflow1.ui.internal.test.actuallyPressBack
 import com.squareup.workflow1.ui.modal.HasModals
 import com.squareup.workflow1.ui.modal.ModalViewContainer
 import com.squareup.workflow1.ui.plus
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.Channel.Factory.UNLIMITED
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Ignore
 import org.junit.Rule
@@ -311,13 +305,10 @@ internal class ComposeViewTreeIntegrationTest {
       val view = LocalView.current
       // TODO remove this once BackStackContainer uses compatibility key
       DisposableEffect(Unit) {
-        // println("OMG setting view ID to ${name.hashCode()}")
         // view.id = name.hashCode()
         totalCompositions++
-        println("OMG composition started: $name ($totalCompositions)")
         onDispose {
           totalCompositions--
-          println("OMG composition ended: $name ($totalCompositions)")
         }
       }
 
@@ -421,7 +412,6 @@ internal class ComposeViewTreeIntegrationTest {
 
     // Iterate in order to set the text in all the screens.
     appStates.forEach { appState ->
-      println("OMG test ${appState.textToEnter}…")
       scenario.onActivity {
         it.setRendering(appState.screens)
       }
@@ -433,44 +423,20 @@ internal class ComposeViewTreeIntegrationTest {
       composeRule.waitForIdle()
     }
 
-    repeat(10) {
-      println("OMG sleeping")
-    }
-
-    Thread.sleep(1_000)
-    composeRule.waitForIdle()
-
-    println("OMG recreating")
     scenario.recreate()
-    println("OMG recreated")
 
     // Now iterate backwards to make sure everything was restored.
-    // appStates.asReversed().forEach { appState ->
-    //   println("OMG test ${appState.textToEnter}…")
-    //   scenario.onActivity {
-    //     // it.setRendering(appState.screens)
-    //   }
-    //   // Make sure we see the header.
-    //   val topScreenName = appState.topScreen.compatibilityKey
-    //   composeRule.waitForIdle()
-    //   // composeRule.onNodeWithText(topScreenName).assertIsDisplayed()
-    //   // composeRule.waitForIdle()
-    //   // println("OMG Saw the screen! checking for text…")
-    //   // composeRule.onNodeWithTag("textfield:$topScreenName")
-    //   //   .assertTextEquals(appState.textToEnter)
-    //   // println("OMG Saw the text! heading back…")
-    //   // composeRule.waitForIdle()
-    //   // actuallyPressBack()
-    // }
-
-    repeat(10) {
-      println("OMG sleeping again")
-    }
-
-    val start = System.currentTimeMillis()
-    while (System.currentTimeMillis() - start < 10_000) {
-      scenario.onActivity { }
-      Thread.sleep(1)
+    appStates.asReversed().forEach { appState ->
+      scenario.onActivity {
+        // it.setRendering(appState.screens)
+      }
+      // Make sure we see the header.
+      val topScreenName = appState.topScreen.compatibilityKey
+      composeRule.onNodeWithText(topScreenName).assertIsDisplayed()
+      composeRule.onNodeWithTag("textfield:$topScreenName")
+        .assertTextEquals(appState.textToEnter)
+      composeRule.waitForIdle()
+      actuallyPressBack()
     }
   }
 

@@ -66,6 +66,7 @@ public class ViewStateFrame(
   override fun getLifecycle(): Lifecycle =
     requireAttached().lifecycleOwner.lifecycle
 
+  // TODO if this needs to be called in onDetached, we need to hold onto it longer
   override fun getSavedStateRegistry(): SavedStateRegistry =
     requireAttached().savedStateController.savedStateRegistry
 
@@ -200,7 +201,7 @@ public class ViewStateFrame(
   }
 
   override fun toString(): String =
-    "${ViewStateFrame::class.java.simpleName}(key=$key, " +
+    "ViewStateFrame(key=$key, " +
       "attachState=$attachState, " +
       "lifecycle=${(attachState as? Attached)?.lifecycleOwner?.lifecycle?.currentState})"
 

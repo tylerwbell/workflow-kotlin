@@ -203,7 +203,8 @@ internal constructor(
     bundle?.keySet()?.forEach { key ->
       val frame = bundle.getParcelable<ViewStateFrame>(key)!!
       if (key == currentFrame?.key) {
-        // This just passes the data to the frame, it doesn't actually tell the TODO
+        // This just passes the data to the frame, it doesn't actually tell the state registry to
+        // restore itself from the data.
         currentFrame!!.loadAndroidXStateRegistryFrom(frame)
       } else {
         hiddenViewStates[key] = frame
@@ -226,11 +227,11 @@ internal constructor(
      */
     private val stateRegistryKey by lazy(NONE) {
       val compositeIdKey = compositeViewIdKey(view)
-      "$compositeIdKey/${ViewStateCache::class.java.simpleName}"
+      "$compositeIdKey/ViewStateCache"
     }
 
-    private   var parentRegistry: SavedStateRegistry? = null
-    private  var parentLifecycle: Lifecycle? = null
+    private var parentRegistry: SavedStateRegistry? = null
+    private var parentLifecycle: Lifecycle? = null
 
     override fun onViewAttachedToWindow(v: View) {
       println("OMG VSC attached to window")
@@ -279,7 +280,7 @@ internal constructor(
       parentRegistry?.unregisterSavedStateProvider(stateRegistryKey)
       parentLifecycle?.removeObserver(this)
       parentRegistry = null
-      parentLifecycle=null
+      parentLifecycle = null
       parentSavedStateRegistryOwner = null
     }
 
